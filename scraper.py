@@ -1,110 +1,176 @@
 import os
+import json
 import csv
-import time
-from playwright.sync_api import sync_playwright
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 
-# Retrieve credentials from GitHub Secrets (passed as environment variables)
-EMAIL = os.environ.get("ACTION_NETWORK_EMAIL")
-PASSWORD = os.environ.get("ACTION_NETWORK_PASSWORD")
+# Leagues to scrape
+LEAGUES = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 
-SPORTS = ["nba", "nhl", "mlb"]
+def determine_suggestion(bet_pct, handle_pct, rlm_detected=False):
+    """
+    Evaluates splits and Reverse Line Movement (RLM) to generate a betting suggestion.
+    """
+    try:
+        bet_pct = float(str(bet_pct).strip('%'))
+        handle_pct = float(str(handle_pct).strip('%'))
+    except (ValueError, AttributeError):
+        return "Pass"
 
-def run():
-    with sync_playwright() as p:
-        # Launch browser in headless mode (required for GitHub Actions)
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+    differential = handle_pct - bet_pct
 
-        # --- STEP 1: LOGIN ---
-        print("Navigating to login page...")
-        page.goto("https://www.actionnetwork.com/login")
+    if differential >= 20 and rlm_detected:
+        return "🔒"
+    elif differential >= 15:
+        return "🔥"
+    elif differential >= 5:
+        return "Play"
+    
+    return "Pass"
+
+def run_scraper():
+    email = os.getenv("ACTION_NETWORK_EMAIL")
+    password = os.getenv("ACTION_NETWORK_PASSWORD")
+
+    if not email or not password:
+        print("Error: Missing credentials in environment variables.")
+        return
+
+    scraped_data = []
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Set up headless Chrome options for GitHub Actions
+    chrome_options = Options()
+    chrome_options.add_argument("--headless") # Run in background. Comment this out to watch it run locally.
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    driver = webdriver.Chrome(options=chrome_options)
+    wait = WebDriverWait(driver, 15) # Global 15-second wait
+
+    try:
+        # --- 1. LOGIN FLOW ---
+        print("Navigating to Action Network...")
+        driver.get("https://www.actionnetwork.com/")
+
+        print("Opening login modal...")
+        login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".user-component__login")))
+        login_btn.click()
+
+        print("Filling credentials...")
+        email_input = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "input[name='email']")))
+        password_input = driver.find_element(By.CSS_SELECTOR, "input[name='password']")
         
-        # NOTE: You must update these selectors based on the actual live website
-        page.fill("input[type='email']", EMAIL)
-        page.fill("input[type='password']", PASSWORD)
-        page.click("button[type='submit']")
-        
-        print("Waiting for login to complete...")
-        # Wait for an element that only appears after logging in, or wait for network idle
-        page.wait_for_load_state("domcontentloaded")
-        time.sleep(3) # Extra buffer for Pro authorization to load
+        email_input.send_keys(email)
+        password_input.send_keys(password)
 
-        all_data = []
+        submit_btn = driver.find_element(By.CSS_SELECTOR, ".sign-in__submit-button")
+        submit_btn.click()
 
-        # --- STEP 2: SCRAPE EACH SPORT ---
-        for sport in SPORTS:
-            print(f"Scraping data for {sport.upper()}...")
-            # Navigate to the specific sport's pro/public betting splits page
-            page.goto(f"https://www.actionnetwork.com/{sport}/public-betting")
-            page.wait_for_load_state("networkidle")
-            time.sleep(2) # Allow data tables to populate
+        print("Waiting for login confirmation...")
+        wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".user-button__profile")))
+        print("Login successful!")
 
-            # Extract rows from the betting table
-            # Update the selector '.betting-table-row' to match Action Network's actual CSS classes
-            rows = page.query_selector_all(".betting-table-row")
+        # --- 2. SCRAPE DATA ---
+        for league in LEAGUES:
+            print(f"Gathering data for {league}...")
+            driver.get(f"https://www.actionnetwork.com/{league.lower()}/public-betting")
             
+            try:
+                # Look for either a standard table or Action's custom grid layout
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table, [data-testid='odds-table']")))
+            except:
+                print(f"No active public betting table found for {league}. Skipping.")
+                continue
+            
+            # Fetch all rows
+            rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            if not rows:
+                rows = driver.find_elements(By.CSS_SELECTOR, "[class*='table-row'], [class*='odds-table__row']")
+
             for row in rows:
                 try:
-                    # These are placeholder selectors. You will need to inspect the webpage 
-                    # and replace these with the actual classes (e.g., '.team-name', '.handle-pct')
-                    matchup = row.query_selector(".matchup-class").inner_text() if row.query_selector(".matchup-class") else "Unknown"
-                    
-                    # Collecting the metrics based on your custom preferences
-                    pct_bets_ats = row.query_selector(".bets-ats-class").inner_text() if row.query_selector(".bets-ats-class") else "N/A"
-                    pct_handle_ats = row.query_selector(".handle-ats-class").inner_text() if row.query_selector(".handle-ats-class") else "N/A"
-                    
-                    pct_bets_total = row.query_selector(".bets-total-class").inner_text() if row.query_selector(".bets-total-class") else "N/A"
-                    pct_handle_total = row.query_selector(".handle-total-class").inner_text() if row.query_selector(".handle-total-class") else "N/A"
-                    
-                    line_movement = row.query_selector(".line-movement-class").inner_text() if row.query_selector(".line-movement-class") else "N/A"
-                    
-                    # Logic for RLM (Reverse Line Movement) and Suggestions (Lock/Fire/Pass)
-                    # This would typically be calculated based on comparing handle vs line movement
-                    rlm = "Yes" if ("specific rlm indicator" in page.content()) else "No"
-                    
-                    suggestion = "PASS"
-                    rationale = "Default"
-                    
-                    # Example logic for applying your lock/fire symbols
-                    if int(pct_handle_ats.strip('%') or 0) > 80 and int(pct_bets_ats.strip('%') or 0) < 40:
-                        suggestion = "🔒 LOCK"
-                        rationale = "Sharp money heavy on ATS with low public bet % (RLM indicator)"
-                    elif int(pct_handle_ats.strip('%') or 0) > 70:
-                        suggestion = "🔥 FIRE"
-                        rationale = "Strong sharp handle"
+                    # Extracting raw text from the row. 
+                    # Note: You may need to tweak these generic selectors using the DOM inspector
+                    teams = row.find_elements(By.CSS_SELECTOR, "span.team-name, .team-name-class")
+                    if len(teams) < 2:
+                        continue 
                         
-                    all_data.append({
-                        "Sport": sport.upper(),
+                    away_team = teams[0].text
+                    home_team = teams[1].text
+                    matchup = f"{away_team} @ {home_team}"
+                    
+                    # Generic fallbacks; update with precise classes
+                    try:
+                        matchup_time = row.find_element(By.CSS_SELECTOR, ".game-time, .time").text
+                    except:
+                        matchup_time = "TBD"
+
+                    try:
+                        line = row.find_element(By.CSS_SELECTOR, ".spread-line, .line").text
+                    except:
+                        line = "N/A"
+
+                    # Placeholder percentage extraction - update with exact Action Network classes
+                    ats_bet_away, ats_bet_home = "30%", "70%"
+                    ats_handle_away, ats_handle_home = "55%", "45%"
+                    
+                    tot_bet_over, tot_bet_under = "60%", "40%"
+                    tot_handle_over, tot_handle_under = "40%", "60%"
+                    
+                    sharp_bet = "Away ATS"
+                    expert_pick = "Home ML"
+                    injuries = "None"
+
+                    # Logic
+                    ats_sugg = determine_suggestion(ats_bet_away, ats_handle_away)
+                    tot_sugg = determine_suggestion(tot_bet_under, tot_handle_under)
+
+                    scraped_data.append({
+                        "League": league,
                         "Matchup": matchup,
-                        "% Bets ATS": pct_bets_ats,
-                        "% Handle ATS": pct_handle_ats,
-                        "% Bets Total": pct_bets_total,
-                        "% Handle Total": pct_handle_total,
-                        "Line Movement": line_movement,
-                        "RLM": rlm,
-                        "Suggestion": suggestion,
-                        "Rationale": rationale
+                        "Time": matchup_time,
+                        "Line": line,
+                        "ATS %bet(away/home)": f"{ats_bet_away} / {ats_bet_home}",
+                        "ATS %handle(away/home)": f"{ats_handle_away} / {ats_handle_home}",
+                        "TOTAL %bet(over/under)": f"{tot_bet_over} / {tot_bet_under}",
+                        "TOTAL %handle(over/under)": f"{tot_handle_over} / {tot_handle_under}",
+                        "Sharp Bet": sharp_bet,
+                        "Expert Pick": expert_pick,
+                        "Injuries": injuries,
+                        "Suggestion Bet": f"ATS: {ats_sugg} | TOT: {tot_sugg}",
+                        "Timestamp": timestamp
                     })
                 except Exception as e:
-                    print(f"Error parsing a row in {sport}: {e}")
+                    print(f"Skipping a row due to parsing error: {e}")
 
-        # --- STEP 3: SAVE TO CSV ---
-        print("Saving data to CSV...")
-        keys = all_data[0].keys() if all_data else ["Sport", "Matchup", "% Bets ATS", "% Handle ATS", "% Bets Total", "% Handle Total", "Line Movement", "RLM", "Suggestion", "Rationale"]
-        
-        with open('betting_splits.csv', 'w', newline='', encoding='utf-8') as output_file:
-            dict_writer = csv.DictWriter(output_file, fieldnames=keys)
+    except Exception as e:
+        print(f"Critical error: {e}")
+    finally:
+        driver.quit()
+
+    # --- 3. EXPORT TO JSON AND CSV ---
+    os.makedirs("data", exist_ok=True)
+    
+    print("Saving data to JSON...")
+    with open("data/splits.json", "w") as f:
+        json.dump(scraped_data, f, indent=4)
+
+    print("Saving data to CSV...")
+    if scraped_data:
+        keys = scraped_data[0].keys()
+        with open("data/betting_splits.csv", "w", newline="", encoding="utf-8") as f:
+            dict_writer = csv.DictWriter(f, fieldnames=keys)
             dict_writer.writeheader()
-            dict_writer.writerows(all_data)
-            
-        print("Scraping completed successfully!")
-        browser.close()
+            dict_writer.writerows(scraped_data)
+        print("Data successfully saved.")
+    else:
+        print("No data was scraped.")
 
 if __name__ == "__main__":
-    if not EMAIL or not PASSWORD:
-        print("ERROR: Credentials not found. Please set GitHub Secrets.")
-    else:
-        run()
+    run_scraper()
