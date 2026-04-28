@@ -1,0 +1,57 @@
+name: Manual Sports Betting Scraper
+
+# Triggers the workflow ONLY manually from the Actions tab
+on:
+  workflow_dispatch:
+
+# Forces GitHub actions to use the updated Node.js 24 environment (fixes the deprecation warning)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Grants the workflow permission to push files back to your repository (fixes Error 128)
+permissions:
+  contents: write
+
+jobs:
+  scrape-and-save:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          # Cache removed to prevent the requirements.txt error
+
+      - name: Install Dependencies
+        # Updated to install Selenium instead of Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium
+
+      - name: Run Scraper
+        env:
+          ACTION_NETWORK_EMAIL: ${{ secrets.ACTION_NETWORK_EMAIL }}
+          ACTION_NETWORK_PASSWORD: ${{ secrets.ACTION_NETWORK_PASSWORD }}
+        run: |
+          python scraper.py
+
+      - name: Commit and Push Data
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          
+          # Check if the CSV file was actually created before trying to push
+          if [ -f data/betting_splits.csv ]; then
+            # Stage everything in the data folder (CSV and JSON)
+            git add data/*
+            
+            # Commit only if there are changes. '|| exit 0' prevents workflow failure if nothing changed.
+            git commit -m "Automated update: Real-time PRO betting data [skip ci]" || exit 0
+            git push
+          else
+            echo "No CSV file was generated (likely no data scraped). Skipping commit."
+          fi
