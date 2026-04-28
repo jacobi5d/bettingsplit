@@ -29,7 +29,7 @@ def run():
         
         print("Waiting for login to complete...")
         # Wait for an element that only appears after logging in, or wait for network idle
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("domcontentloaded")
         time.sleep(3) # Extra buffer for Pro authorization to load
 
         all_data = []
